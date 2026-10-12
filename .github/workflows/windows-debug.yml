@@ -1,0 +1,142 @@
+name: Windows RDP Debug
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-rdp-debug
+  cancel-in-progress: false
+
+jobs:
+  debug:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Set session deadline
+        run: |
+          $deadline = (Get-Date).ToUniversalTime().AddMinutes(355)
+          "DEBUG_DEADLINE=$($deadline.ToString('o'))" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Connect Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TS_AUTHKEY }}
+          hostname: gh-windows-debug
+
+      - name: Configure remote desktop
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "RDP_PASSWORD secret is missing."
+          }
+
+          if ($env:RDP_PASSWORD.Length -lt 16) {
+            throw "Use an RDP_PASSWORD with at least 16 characters."
+          }
+
+          $password = ConvertTo-SecureString `
+            $env:RDP_PASSWORD -AsPlainText -Force
+
+          New-LocalUser `
+            -Name "rdpdebug" `
+            -Password $password `
+            -Description "Temporary project debugging account" |
+            Out-Null
+
+          # Allow administrative software installation.
+          $admins = Get-LocalGroup -SID "S-1-5-32-544"
+          Add-LocalGroupMember `
+            -Group $admins `
+            -Member "rdpdebug"
+
+          $rdpUsers = Get-LocalGroup -SID "S-1-5-32-555"
+          Add-LocalGroupMember `
+            -Group $rdpUsers `
+            -Member "rdpdebug"
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          # Keep Network Level Authentication enabled.
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1
+
+          # Replace broad built-in RDP firewall allowances.
+          Get-NetFirewallRule `
+            -Name "RemoteDesktop*" `
+            -ErrorAction SilentlyContinue |
+            Disable-NetFirewallRule
+
+          $tsIP = (tailscale ip -4 | Select-Object -First 1).Trim()
+
+          if (-not $tsIP) {
+            throw "Tailscale IPv4 address is unavailable."
+          }
+
+          New-NetFirewallRule `
+            -DisplayName "RDP through Tailscale only" `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -LocalAddress $tsIP `
+            -RemoteAddress "100.64.0.0/10" `
+            -Profile Any |
+            Out-Null
+
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
+
+          Write-Host "================================"
+          Write-Host "RDP address: $tsIP"
+          Write-Host "Username: $env:COMPUTERNAME\rdpdebug"
+          Write-Host "Password: your RDP_PASSWORD secret"
+          Write-Host "Project folder: $env:GITHUB_WORKSPACE"
+          Write-Host "Session deadline (UTC): $env:DEBUG_DEADLINE"
+          Write-Host "================================"
+
+      - name: Keep debugging session available
+        run: |
+          $deadline = [DateTimeOffset]::Parse($env:DEBUG_DEADLINE)
+
+          Write-Host "Cancel the workflow when testing is finished."
+
+          while ([DateTimeOffset]::UtcNow -lt $deadline) {
+            Start-Sleep -Seconds 30
+          }
+
+      - name: Close remote desktop access
+        if: always()
+        run: |
+          Get-NetFirewallRule `
+            -DisplayName "RDP through Tailscale only" `
+            -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule
+
+          Set-ItemProperty `
+            -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 1
+
+          Disable-LocalUser `
+            -Name "rdpdebug" `
+            -ErrorAction SilentlyContinue
