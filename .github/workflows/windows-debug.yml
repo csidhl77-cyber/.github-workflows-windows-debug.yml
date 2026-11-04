@@ -106,13 +106,37 @@ jobs:
             -ErrorAction SilentlyContinue |
             Disable-NetFirewallRule
 
-          $tsIP = (tailscale ip -4 | Select-Object -First 1)
+          # Capture the command output before checking its exit code.
+          # Retry if the Tailscale IPv4 address is not ready.
+          $tsIP = $null
 
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tsIP)) {
-            throw "Tailscale IPv4 address is unavailable."
+          for ($attempt = 1; $attempt -le 6; $attempt++) {
+            $ipOutput = @(tailscale ip -4)
+            $ipExitCode = $LASTEXITCODE
+
+            $candidate = ($ipOutput -join "`n").Trim()
+            $parsedIP = $null
+
+            if (
+              $ipExitCode -eq 0 -and
+              [System.Net.IPAddress]::TryParse($candidate, [ref]$parsedIP) -and
+              $parsedIP.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork
+            ) {
+              $tsIP = $candidate
+              break
+            }
+
+            Write-Host "IP attempt $attempt failed. Exit code: $ipExitCode"
+            Write-Host "Command output: $candidate"
+            Start-Sleep -Seconds 5
           }
 
-          $tsIP = $tsIP.Trim()
+          if ([string]::IsNullOrWhiteSpace($tsIP)) {
+            tailscale status
+            throw "Could not get Tailscale IPv4. See diagnostic output above."
+          }
+
+          Write-Host "Tailscale IPv4 obtained: $tsIP"
 
           New-NetFirewallRule `
             -DisplayName "RDP through Tailscale only" `
