@@ -35,6 +35,26 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           hostname: gh-windows-debug
 
+      - name: Route internet through home PC
+        env:
+          TS_EXIT_NODE: ${{ secrets.TS_EXIT_NODE }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:TS_EXIT_NODE)) {
+            throw "TS_EXIT_NODE secret is missing."
+          }
+
+          $exitNode = $env:TS_EXIT_NODE.Trim()
+
+          tailscale set --exit-node="$exitNode"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not enable the home PC exit node. Check that it is online and approved in Tailscale."
+          }
+
+          Write-Host "Home PC exit node selected."
+
       - name: Configure remote desktop
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
@@ -86,11 +106,13 @@ jobs:
             -ErrorAction SilentlyContinue |
             Disable-NetFirewallRule
 
-          $tsIP = (tailscale ip -4 | Select-Object -First 1).Trim()
+          $tsIP = (tailscale ip -4 | Select-Object -First 1)
 
-          if (-not $tsIP) {
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tsIP)) {
             throw "Tailscale IPv4 address is unavailable."
           }
+
+          $tsIP = $tsIP.Trim()
 
           New-NetFirewallRule `
             -DisplayName "RDP through Tailscale only" `
@@ -118,6 +140,7 @@ jobs:
         run: |
           $deadline = [DateTimeOffset]::Parse($env:DEBUG_DEADLINE)
 
+          Write-Host "Keep your home PC online with Tailscale connected."
           Write-Host "Cancel the workflow when testing is finished."
 
           while ([DateTimeOffset]::UtcNow -lt $deadline) {
