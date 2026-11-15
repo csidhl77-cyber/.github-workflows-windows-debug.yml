@@ -12,6 +12,8 @@ concurrency:
 
 jobs:
   debug:
+    # Note: Standard 'windows-latest' par physical GPU nahi hota.
+    # Agar aapke account par GPU runner enabled hai, to 'windows-latest' ki jagah apna GPU runner label likhein.
     runs-on: windows-latest
     timeout-minutes: 360
 
@@ -35,7 +37,7 @@ jobs:
           authkey: ${{ secrets.TS_AUTHKEY }}
           hostname: gh-windows-debug
 
-      - name: Configure remote desktop
+      - name: Configure remote desktop and Graphics Optimization
         env:
           RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
         run: |
@@ -79,6 +81,21 @@ jobs:
             -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
             -Name "UserAuthentication" `
             -Value 1
+
+          # --- GPU / Graphics & RDP Performance Optimization ---
+          $tsPolicyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (-not (Test-Path $tsPolicyPath)) {
+            New-Item -Path $tsPolicyPath -Force | Out-Null
+          }
+          
+          # Enable WDDM graphics display driver & hardware acceleration for RDP
+          Set-ItemProperty -Path $tsPolicyPath -Name "fEnableWddmDriver" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPolicyPath -Name "bEnumerateHWBeforeSW" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPolicyPath -Name "AVC444ModePreferred" -Value 1 -Type DWord
+          Set-ItemProperty -Path $tsPolicyPath -Name "MaxCompressionLevel" -Value 1 -Type DWord
+
+          # Set Windows Power Plan to High Performance to reduce CPU lag
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
 
           # Replace broad built-in RDP firewall allowances.
           Get-NetFirewallRule `
